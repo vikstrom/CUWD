@@ -24,7 +24,7 @@ byte controlRegister = 0;
 
 //Defining pins
 #define EN_pin_SMPS A2	//Enable pin for 5V reg. Keep low when sleeping
-#define MTP_RTC A3		//Alarm pin from RTC-chip, active LOW, require PULL UP
+#define MFP_RTC A3		//Alarm pin from RTC-chip, active LOW, require PULL UP
 #define SDA_pin A4		//I2C SDA pin, require PULL UP
 #define SCL_pin A5		//I2C SCL pin, require PULL UP
 #define RECV_PIN 0		//IR signal pin, input
@@ -35,7 +35,7 @@ byte controlRegister = 0;
 
 IRrecv irrecv(RECV_PIN);	//Initiate IR Receiver
 decode_results results;		//For storing received codes
-uint16_t lastCode = 0;		//Storing last code reveived
+uint16_t lastCode = 0;		//Storing last code received
 
 #define BUTTON_POWER 0xD827	//Codes for buttons on IR-remote
 #define BUTTON_A 0xF807
@@ -46,9 +46,6 @@ uint16_t lastCode = 0;		//Storing last code reveived
 #define BUTTON_LEFT 0x10EF
 #define BUTTON_RIGHT 0x807F
 #define BUTTON_CIRCLE 0x20DF
-
-uint16_t BUTTON_CURRENT = 0;
-
 
 //// Menu items ////
 
@@ -64,8 +61,8 @@ uint16_t alarmMonth = 0;
 uint16_t alarmHours = 0;
 uint16_t alarmMinutes = 0;
 
-const uint16_t MINUTE_CHANGE = 5;
-const uint16_t MAX_MINUTE = 55;
+const uint16_t MINUTE_CHANGE = 1;	//Number of minutes to change for each click
+const uint16_t MAX_MINUTE = 60 - MINUTE_CHANGE;
 const uint16_t MAX_HOUR = 23;
 
 // Calibration
@@ -97,20 +94,20 @@ void handleIr()
 	{
 	    case BUTTON_POWER:
 	    	Serial.println("POWER button");
-	    	alarmOnOff();
+	    	alarmOnOff();	//Switches the alarm
 	      break;
 
 	    case BUTTON_A:
 	     	Serial.println("A button");
-	     	if(alarmSetMenuActive)
+	     	if(alarmSetMenuActive)	//If the user currently is setting the alarm
 	     	{
 	     		writeToRTC(ALARM0_REG);
 	     		Serial.println("Write complete!");
 	     		readFromRTC(ALARM0_REG);
-	     		Serial.println("Current Alarm: ");
+	     		Serial.print("Current Alarm: ");
 	     		printTime();
 	     	}
-	     	else if(!alarmSetMenuActive)
+	     	else if(!alarmSetMenuActive)	//Else the user wants to start setting the alarm
 	     	{
 		     	readFromRTC(TIME_REG);
 		     	setAlarmMenu();
@@ -119,17 +116,17 @@ void handleIr()
 
 	    case BUTTON_B:
 	     	Serial.println("B button");
-	     	calibration();
+	     	calibration();	//Starts the calibration
 	      break;
 
 	    case BUTTON_C:
 	     	Serial.println("C button");
-	     	testAlarm();
+	     	Alarm(1);	//Test button
 	      break;
 
 	    case BUTTON_UP:
 	     	Serial.println("UP button");
-	     	if(alarmSetMenuActive)
+	     	if(alarmSetMenuActive)	//If user is setting the alarm
 	     	{
 	     		if(alarmSetHoursActive && alarmHours < MAX_HOUR)
 	     			alarmHours++;
@@ -139,7 +136,7 @@ void handleIr()
 	     				alarmDate++;
 	     			}
 
-	     		if(alarmSetMinutesActive && alarmMinutes < (MAX_MINUTE - 5))
+	     		if(alarmSetMinutesActive && alarmMinutes < (MAX_MINUTE))
 	     			alarmMinutes = alarmMinutes + MINUTE_CHANGE;
 	     			else if(alarmSetMinutesActive && alarmMinutes == MAX_MINUTE)	
 	     				alarmMinutes = 0;
@@ -171,7 +168,7 @@ void handleIr()
 
 	    case BUTTON_LEFT:
 	     	Serial.println("LEFT button");
-		     if(alarmSetMenuActive)
+		     if(alarmSetMenuActive)	//If user is setting alarm, change value to be altered
 		     {	
 		     	if(alarmSetMinutesActive)
 		     	{
@@ -188,7 +185,7 @@ void handleIr()
 
 	    case BUTTON_RIGHT:
 	     	Serial.println("RIGHT button");
-	     	if(alarmSetMenuActive)
+	     	if(alarmSetMenuActive)	//Same thing as above
 		     {	
 		     	if(alarmSetHoursActive)
 		     	{
@@ -246,11 +243,14 @@ void startMotor()
 		analogWrite(Motor_PWM_pin, i);
 		delay(1);
 	}
+
+	motorRunning = 1;
 }
 
 void stopMotor()
 {
 	analogWrite(Motor_PWM_pin, 0);
+	motorRunning = 0;
 }
 
 
@@ -258,21 +258,38 @@ void alarmOnOff()	// Sets alarm in RTC register
 {
 	resetMenu();
 	readFromRTC(CONTROL_REG);
+	byte controlRegisterTemp = controlRegister;
+	Serial.println(controlRegister);
 	if(controlRegister & B00010000)	// If bit 4 (ALM0) is set
 	{	
 		controlRegister = (controlRegister & B11101111);	// Mask all bits but bit 4 with "AND 1". Sets bit 4 = 0.
 		writeToRTC(CONTROL_REG);
 		Serial.println("Alarm turned off");
+		Serial.println(controlRegister);
 		alarmIsSet = 0;
 	}
-	else if ( !(controlRegister & B00010000) )
+	else if ( ((controlRegister & B00010000) == 0))
 	{
 		controlRegister = (controlRegister | B00010000);	// Mask all bits but bit 4 with "OR 0". Sets bit 4 = 1.
+		Serial.println(controlRegister);
 		writeToRTC(CONTROL_REG);
+		int checkMFP = 0;						//It's important to check if the MFP goes high when setting the register
+		unsigned long timer = millis();			//And to stop it triggering the motor when we don't want to
+		while(((millis() - timer) < 50) && (checkMFP == 0)) {
+		    checkMFP = digitalRead(MFP_RTC);
+			if(checkMFP) {
+				controlRegister = controlRegisterTemp;
+				writeToRTC(CONTROL_REG);
+				Serial.println("Error, set new alarm-time before turning on alarm");
+			}
+		}
+		if (checkMFP == 0) {
 		Serial.println("Alarm turned on");
+		Serial.println(controlRegister);
 		readFromRTC(ALARM0_REG);
 		printTime();
 		alarmIsSet = 1;
+		}
 	}
 
 }
@@ -295,7 +312,14 @@ void setAlarmMenu()
 	Serial.print("Alarm time: ");
 	Serial.print(alarmHours);
 	Serial.print(":");
-	Serial.println(alarmMinutes);
+	if(alarmMinutes <= 9)
+	{
+		Serial.print("0");
+		Serial.println(alarmMinutes);
+	}
+	else
+		Serial.println(alarmMinutes);
+
 	Serial.println();
 }
 
@@ -372,14 +396,14 @@ void writeToRTC(int MCP7940_REG)
 	    case ALARM0_REG:
 			Wire.beginTransmission(MCP7940);
 			Wire.write(MCP7940_REG);
-			Wire.write(decToBcd(second));
+			Wire.write(decToBcd(0));	//Always write 0 to seconds when setting the alarm
 			Wire.write(decToBcd(alarmMinutes));
 			Wire.write(decToBcd(alarmHours));
 			Wire.write(decToBcd(alarmDay) | B11110000);	//Also sets alarm comparator bits
 			Wire.write(decToBcd(alarmDate));
 			Wire.write(decToBcd(alarmMonth));
 			Wire.endTransmission();
-	    break;''
+	    break;
 
 	    default:
 	    break;
@@ -397,7 +421,13 @@ void printTime()
 	Serial.print("	");
 	Serial.print(hour);
 	Serial.print(":");
-	Serial.println(minute);
+	if(minute <= 9)
+	{
+		Serial.print("0");
+		Serial.println(minute);
+	}
+	else
+		Serial.println(minute);
 
 }
 
@@ -410,6 +440,36 @@ byte bcdToDec(byte val)
 	return ((val/16*10) + (val%16));
 }
 
+void resetControlRegister()
+{
+	readFromRTC(CONTROL_REG);
+	if(controlRegister != B00000000)	//Resetting control register so that the alarm output is not triggering the motor
+	{
+		controlRegister = B00000000;
+		writeToRTC(CONTROL_REG);
+		Serial.println("controlRegister byte is set to 0");
+	}
+
+}
+
+void Alarm(int alarmTrig)
+{	
+	if(alarmTrig) {
+		Serial.println("ALARM!");
+		resetControlRegister();
+		startMotor();
+	}
+}
+
+void motorControl(int motorStatus)
+{
+	if(((millis() - motorStartTime) >= calibrationTime) && !calibrationPullActive)
+	{	
+		stopMotor();
+	}
+
+}
+
 
 void setup() 
 {
@@ -417,25 +477,25 @@ void setup()
 	Wire.begin();
 	irrecv.enableIRIn();	//Start receiver
 	pinMode(EN_pin_SMPS, OUTPUT);
-	pinMode(MTP_RTC, INPUT_PULLUP);
+	pinMode(MFP_RTC, INPUT);
 	pinMode(Motor_PWM_pin, OUTPUT);
 	pinMode(RECV_PIN, INPUT_PULLUP);
 	pinMode(VCC_MEAS_PIN, INPUT);
 	//digitalWrite(EN_pin_SMPS, HIGH);	//Enable SMPS 5V
+	resetControlRegister();
 	readFromRTC(TIME_REG);
 	printTime();
   }
 
-void loop() 
+void loop() 	//Polls the ir-input, runs the motorControl and checks if the alarm pin is high.
 {
 	
-	if(irrecv.decode(&results))
+	if(irrecv.decode(&results))	//If there's something on the input
 		handleIr();
-	
-	if(((millis() - motorStartTime) >= calibrationTime) && motorAlarmTest == 1)
-	{	
-		stopMotor();
-		motorAlarmTest = 0;
-	}
+
+	motorControl(motorRunning);	
+
+	Alarm(digitalRead(MFP_RTC));
+
 }
 
